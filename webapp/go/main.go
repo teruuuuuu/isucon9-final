@@ -64,6 +64,18 @@ type Train struct {
 	IsNobori     bool      `json:"is_nobori" db:"is_nobori"`
 }
 
+type TrainSection struct {
+	Date         time.Time `json:"date" db:"date"`
+	DepartureAt  string    `json:"departure_at" db:"departure_at"`
+	TrainClass   string    `json:"train_class" db:"train_class"`
+	TrainName    string    `json:"train_name" db:"train_name"`
+	StartStation string    `json:"start_station" db:"start_station"`
+	LastStation  string    `json:"last_station" db:"last_station"`
+	IsNobori     bool      `json:"is_nobori" db:"is_nobori"`
+	Departure    string    `json:"departure" db:"departure"`
+	Arrival      string    `json:"arrival" db:"arrival"`
+}
+
 type Seat struct {
 	TrainClass    string `json:"train_class" db:"train_class"`
 	CarNumber     int    `json:"car_number" db:"car_number"`
@@ -71,6 +83,13 @@ type Seat struct {
 	SeatRow       int    `json:"seat_row" db:"seat_row"`
 	SeatClass     string `json:"seat_class" db:"seat_class"`
 	IsSmokingSeat bool   `json:"is_smoking_seat" db:"is_smoking_seat"`
+}
+
+type SeatNokori struct {
+	CarNumber     int    `json:"car_number" db:"car_number"`
+	SeatClass     string `json:"seat_class" db:"seat_class"`
+	IsSmokingSeat bool   `json:"is_smoking_seat" db:"is_smoking_seat"`
+	Nokori       int    `json:"nokori" db:"nokori"`
 }
 
 type Reservation struct {
@@ -232,6 +251,11 @@ type InitializeResponse struct {
 
 type AuthResponse struct {
 	Email string `json:"email"`
+}
+
+type DepartureInfo struct {
+	Departure        string            `json:"departure"`
+	Arrival          string            `json:"arrival"`
 }
 
 const (
@@ -460,248 +484,179 @@ func trainSearchHandler(w http.ResponseWriter, r *http.Request) {
 	child, _ := strconv.Atoi(r.URL.Query().Get("child"))
 
 	var fromStation, toStation Station
-	query := "SELECT * FROM station_master WHERE name=?"
-
-	// From
-	err = dbx.Get(&fromStation, query, fromName)
-	if err == sql.ErrNoRows {
-		log.Print("fromStation: no rows")
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// To
-	err = dbx.Get(&toStation, query, toName)
-	if err == sql.ErrNoRows {
-		log.Print("toStation: no rows")
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err != nil {
-		log.Print(err)
-		errorResponse(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	isNobori := false
-	if fromStation.Distance > toStation.Distance {
-		isNobori = true
-	}
-
-	query = "SELECT * FROM station_master ORDER BY distance"
-	if isNobori {
-		// 上りだったら駅リストを逆にする
-		query += " DESC"
-	}
-
-	usableTrainClassList := getUsableTrainClassList(fromStation, toStation)
-
-	var inQuery string
-	var inArgs []interface{}
-
-	if trainClass == "" {
-		query := "SELECT * FROM train_master WHERE date=? AND train_class IN (?) AND is_nobori=?"
-		inQuery, inArgs, err = sqlx.In(query, date.Format("2006/01/02"), usableTrainClassList, isNobori)
-	} else {
-		query := "SELECT * FROM train_master WHERE date=? AND train_class IN (?) AND is_nobori=? AND train_class=?"
-		inQuery, inArgs, err = sqlx.In(query, date.Format("2006/01/02"), usableTrainClassList, isNobori, trainClass)
-	}
-	if err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	trainList := []Train{}
-	err = dbx.Select(&trainList, inQuery, inArgs...)
-	if err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
+	query := "SELECT * FROM station_master ORDER BY distance"
 	stations := []Station{}
+	stationsMap := make(map[string]int)
 	err = dbx.Select(&stations, query)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	fromIndex := -1
+	toIndex := -1
+	for i, station := range stations {
+		if station.Name == fromName {
+			fromIndex = i
+			fromStation = station
+		}
+		if station.Name == toName {
+			toIndex = i
+			toStation = station
+		}
+	}
+	if fromIndex == -1 {
+		log.Print("fromStation: no rows")
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	} else if toIndex == -1 {
+		log.Print("toStation: no rows")
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	isNobori := false
+	if fromIndex > toIndex {
+		isNobori = true
+	}
+	for i, station := range stations {
+		if !isNobori {
+			stationsMap[station.Name] = i
+		} else {
+			stationsMap[station.Name] = len(stations) - i
+		}
+		
+	}
+	fromIndex = stationsMap[fromStation.Name]
+	toIndex = stationsMap[toStation.Name]
 
-	fmt.Println("From", fromStation)
-	fmt.Println("To", toStation)
+	usableTrainClassList := getUsableTrainClassList(fromStation, toStation)
+	var inQuery string
+	var inArgs []interface{}
+	query2 := `
+	SELECT t.* , fr.departure, tt.arrival
+	FROM train_master t
+	JOIN train_timetable_master fr on t.date = fr.date and t.train_class = fr.train_class and t.train_name = fr.train_name and fr.station = ?
+	JOIN train_timetable_master tt on t.date = tt.date and t.train_class = tt.train_class and t.train_name = tt.train_name and tt.station = ?
+	WHERE t.date=? 
+	  AND t.train_class IN (?) 
+	  AND t.is_nobori=?		
+	`
+
+	if trainClass == "" {
+		query2 += " ORDER BY t.departure_at"
+		inQuery, inArgs, err = sqlx.In(query2, fromStation.Name, toStation.Name, date.Format("2006/01/02"), usableTrainClassList, isNobori)
+	} else {
+		query2 += " AND t.train_class=? ORDER BY t.departure_at"
+		inQuery, inArgs, err = sqlx.In(query2, fromStation.Name, toStation.Name, date.Format("2006/01/02"), usableTrainClassList, isNobori, trainClass)
+	}
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	trainSectionList := []TrainSection{}
+	err = dbx.Select(&trainSectionList, inQuery, inArgs...)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 
 	trainSearchResponseList := []TrainSearchResponse{}
 
-	for _, train := range trainList {
-		isSeekedToFirstStation := false
-		isContainsOriginStation := false
-		isContainsDestStation := false
-		i := 0
-
-		for _, station := range stations {
-
-			if !isSeekedToFirstStation {
-				// 駅リストを列車の発駅まで読み飛ばして頭出しをする
-				// 列車の発駅以前は止まらないので無視して良い
-				if station.Name == train.StartStation {
-					isSeekedToFirstStation = true
-				} else {
-					continue
-				}
-			}
-
-			if station.ID == fromStation.ID {
-				// 発駅を経路中に持つ編成の場合フラグを立てる
-				isContainsOriginStation = true
-			}
-			if station.ID == toStation.ID {
-				if isContainsOriginStation {
-					// 発駅と着駅を経路中に持つ編成の場合
-					isContainsDestStation = true
-					break
-				} else {
-					// 出発駅より先に終点が見つかったとき
-					fmt.Println("なんかおかしい")
-					break
-				}
-			}
-			if station.Name == train.LastStation {
-				// 駅が見つからないまま当該編成の終点に着いてしまったとき
-				break
-			}
-			i++
+	for _, train := range trainSectionList {		
+		time.Parse("2006/01/02 15:04:05 -07:00 MST", fmt.Sprintf("%s %s +09:00 JST", date.Format("2006/01/02"), train.Departure))
+		departureDate, _ := time.Parse("2006/01/02 15:04:05 -07:00 MST", fmt.Sprintf("%s %s +09:00 JST", date.Format("2006/01/02"), train.Departure))
+		
+		if !date.Before(departureDate) {
+			// 乗りたい時刻より出発時刻が前なので除外
+			continue
 		}
 
-		if isContainsOriginStation && isContainsDestStation {
-			// 列車情報
+		if stationsMap[train.StartStation] > fromIndex {
+			continue
+		}
+		if stationsMap[train.LastStation] < toIndex {
+			continue
+		}
+		nokori_seats, err := train.getAvailableSeats2(fromStation, toStation)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		premium_avail := "○"
+		if nokori_seats["premium-nonsmoking"] == 0 {
+			premium_avail = "×"
+		} else if nokori_seats["premium-nonsmoking"] < 10 {
+			premium_avail = "△"
+		}
+		premium_smoke_avail := "○"
+		if nokori_seats["premium-smoking"] == 0 {
+			premium_smoke_avail = "×"
+		} else if nokori_seats["premium-smoking"] < 10 {
+			premium_smoke_avail = "△"
+		}
+		reserved_avail := "○"
+		if nokori_seats["reserved-nonsmoking"] == 0 {
+			reserved_avail = "×"
+		} else if nokori_seats["reserved-nonsmoking"] < 10 {
+			reserved_avail = "△"
+		}
+		reserved_smoke_avail := "○"
+		if nokori_seats["reserved-smoking"] == 0 {
+			reserved_smoke_avail = "×"
+		} else if nokori_seats["reserved-smoking"] < 10 {
+			reserved_smoke_avail = "△"
+		}
 
-			// 所要時間
-			var departure, arrival string
+		// 空席情報
+		seatAvailability := map[string]string{
+			"premium":        premium_avail,
+			"premium_smoke":  premium_smoke_avail,
+			"reserved":       reserved_avail,
+			"reserved_smoke": reserved_smoke_avail,
+			"non_reserved":   "○",
+		}
 
-			err = dbx.Get(&departure, "SELECT departure FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?", date.Format("2006/01/02"), train.TrainClass, train.TrainName, fromStation.Name)
-			if err != nil {
-				errorResponse(w, http.StatusInternalServerError, err.Error())
-				return
-			}
+		// 料金計算
+		premiumFare, err := fareCalc(date, fromStation.ID, toStation.ID, train.TrainClass, "premium")
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		premiumFare = premiumFare*adult + premiumFare/2*child
 
-			departureDate, err := time.Parse("2006/01/02 15:04:05 -07:00 MST", fmt.Sprintf("%s %s +09:00 JST", date.Format("2006/01/02"), departure))
-			if err != nil {
-				errorResponse(w, http.StatusInternalServerError, err.Error())
-				return
-			}
+		reservedFare, err := fareCalc(date, fromStation.ID, toStation.ID, train.TrainClass, "reserved")
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		reservedFare = reservedFare*adult + reservedFare/2*child
 
-			if !date.Before(departureDate) {
-				// 乗りたい時刻より出発時刻が前なので除外
-				continue
-			}
+		nonReservedFare, err := fareCalc(date, fromStation.ID, toStation.ID, train.TrainClass, "non-reserved")
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		nonReservedFare = nonReservedFare*adult + nonReservedFare/2*child
 
-			err = dbx.Get(&arrival, "SELECT arrival FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?", date.Format("2006/01/02"), train.TrainClass, train.TrainName, toStation.Name)
-			if err != nil {
-				errorResponse(w, http.StatusInternalServerError, err.Error())
-				return
-			}
+		fareInformation := map[string]int{
+			"premium":        premiumFare,
+			"premium_smoke":  premiumFare,
+			"reserved":       reservedFare,
+			"reserved_smoke": reservedFare,
+			"non_reserved":   nonReservedFare,
+		}
 
-			premium_avail_seats, err := train.getAvailableSeats(fromStation, toStation, "premium", false)
-			if err != nil {
-				errorResponse(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			premium_smoke_avail_seats, err := train.getAvailableSeats(fromStation, toStation, "premium", true)
-			if err != nil {
-				errorResponse(w, http.StatusBadRequest, err.Error())
-				return
-			}
+		trainSearchResponseList = append(trainSearchResponseList, TrainSearchResponse{
+			train.TrainClass, train.TrainName, train.StartStation, train.LastStation,
+			fromStation.Name, toStation.Name, train.Departure, train.Arrival, seatAvailability, fareInformation,
+		})
 
-			reserved_avail_seats, err := train.getAvailableSeats(fromStation, toStation, "reserved", false)
-			if err != nil {
-				errorResponse(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			reserved_smoke_avail_seats, err := train.getAvailableSeats(fromStation, toStation, "reserved", true)
-			if err != nil {
-				errorResponse(w, http.StatusBadRequest, err.Error())
-				return
-			}
-
-			premium_avail := "○"
-			if len(premium_avail_seats) == 0 {
-				premium_avail = "×"
-			} else if len(premium_avail_seats) < 10 {
-				premium_avail = "△"
-			}
-
-			premium_smoke_avail := "○"
-			if len(premium_smoke_avail_seats) == 0 {
-				premium_smoke_avail = "×"
-			} else if len(premium_smoke_avail_seats) < 10 {
-				premium_smoke_avail = "△"
-			}
-
-			reserved_avail := "○"
-			if len(reserved_avail_seats) == 0 {
-				reserved_avail = "×"
-			} else if len(reserved_avail_seats) < 10 {
-				reserved_avail = "△"
-			}
-
-			reserved_smoke_avail := "○"
-			if len(reserved_smoke_avail_seats) == 0 {
-				reserved_smoke_avail = "×"
-			} else if len(reserved_smoke_avail_seats) < 10 {
-				reserved_smoke_avail = "△"
-			}
-
-			// 空席情報
-			seatAvailability := map[string]string{
-				"premium":        premium_avail,
-				"premium_smoke":  premium_smoke_avail,
-				"reserved":       reserved_avail,
-				"reserved_smoke": reserved_smoke_avail,
-				"non_reserved":   "○",
-			}
-
-			// 料金計算
-			premiumFare, err := fareCalc(date, fromStation.ID, toStation.ID, train.TrainClass, "premium")
-			if err != nil {
-				errorResponse(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			premiumFare = premiumFare*adult + premiumFare/2*child
-
-			reservedFare, err := fareCalc(date, fromStation.ID, toStation.ID, train.TrainClass, "reserved")
-			if err != nil {
-				errorResponse(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			reservedFare = reservedFare*adult + reservedFare/2*child
-
-			nonReservedFare, err := fareCalc(date, fromStation.ID, toStation.ID, train.TrainClass, "non-reserved")
-			if err != nil {
-				errorResponse(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			nonReservedFare = nonReservedFare*adult + nonReservedFare/2*child
-
-			fareInformation := map[string]int{
-				"premium":        premiumFare,
-				"premium_smoke":  premiumFare,
-				"reserved":       reservedFare,
-				"reserved_smoke": reservedFare,
-				"non_reserved":   nonReservedFare,
-			}
-
-			trainSearchResponseList = append(trainSearchResponseList, TrainSearchResponse{
-				train.TrainClass, train.TrainName, train.StartStation, train.LastStation,
-				fromStation.Name, toStation.Name, departure, arrival, seatAvailability, fareInformation,
-			})
-
-			if len(trainSearchResponseList) >= 10 {
-				break
-			}
+		if len(trainSearchResponseList) >= 10 {
+			break
 		}
 	}
+	fmt.Println("trainSearchResponseList:", trainSearchResponseList)
 	resp, err := json.Marshal(trainSearchResponseList)
 	if err != nil {
 		errorResponse(w, http.StatusBadRequest, err.Error())
@@ -710,6 +665,293 @@ func trainSearchHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(resp)
 
 }
+
+// func trainSearchHandler(w http.ResponseWriter, r *http.Request) {
+// 	/*
+// 		列車検索
+// 			GET /train/search?use_at=<ISO8601形式の時刻> & from=東京 & to=大阪
+
+// 		return
+// 			料金
+// 			空席情報
+// 			発駅と着駅の到着時刻
+
+// 	*/
+
+// 	jst := time.FixedZone("JST", 9*60*60)
+// 	date, err := time.Parse(time.RFC3339, r.URL.Query().Get("use_at"))
+// 	if err != nil {
+// 		errorResponse(w, http.StatusBadRequest, err.Error())
+// 		return
+// 	}
+// 	date = date.In(jst)
+
+// 	if !checkAvailableDate(date) {
+// 		errorResponse(w, http.StatusNotFound, "予約可能期間外です")
+// 		return
+// 	}
+
+// 	trainClass := r.URL.Query().Get("train_class")
+// 	fromName := r.URL.Query().Get("from")
+// 	toName := r.URL.Query().Get("to")
+
+// 	adult, _ := strconv.Atoi(r.URL.Query().Get("adult"))
+// 	child, _ := strconv.Atoi(r.URL.Query().Get("child"))
+
+// 	var fromStation, toStation Station
+// 	query := "SELECT * FROM station_master WHERE name=?"
+
+// 	// From
+// 	err = dbx.Get(&fromStation, query, fromName)
+// 	if err == sql.ErrNoRows {
+// 		log.Print("fromStation: no rows")
+// 		errorResponse(w, http.StatusBadRequest, err.Error())
+// 		return
+// 	}
+// 	if err != nil {
+// 		errorResponse(w, http.StatusInternalServerError, err.Error())
+// 		return
+// 	}
+
+// 	// To
+// 	err = dbx.Get(&toStation, query, toName)
+// 	if err == sql.ErrNoRows {
+// 		log.Print("toStation: no rows")
+// 		errorResponse(w, http.StatusBadRequest, err.Error())
+// 		return
+// 	}
+// 	if err != nil {
+// 		log.Print(err)
+// 		errorResponse(w, http.StatusInternalServerError, err.Error())
+// 		return
+// 	}
+
+// 	isNobori := false
+// 	if fromStation.Distance > toStation.Distance {
+// 		isNobori = true
+// 	}
+
+// 	query = "SELECT * FROM station_master ORDER BY distance"
+// 	if isNobori {
+// 		// 上りだったら駅リストを逆にする
+// 		query += " DESC"
+// 	}
+
+// 	usableTrainClassList := getUsableTrainClassList(fromStation, toStation)
+
+// 	var inQuery string
+// 	var inArgs []interface{}
+
+// 	if trainClass == "" {
+// 		query := "SELECT * FROM train_master WHERE date=? AND train_class IN (?) AND is_nobori=?"
+// 		inQuery, inArgs, err = sqlx.In(query, date.Format("2006/01/02"), usableTrainClassList, isNobori)
+// 	} else {
+// 		query := "SELECT * FROM train_master WHERE date=? AND train_class IN (?) AND is_nobori=? AND train_class=?"
+// 		inQuery, inArgs, err = sqlx.In(query, date.Format("2006/01/02"), usableTrainClassList, isNobori, trainClass)
+// 	}
+// 	if err != nil {
+// 		errorResponse(w, http.StatusBadRequest, err.Error())
+// 		return
+// 	}
+
+// 	trainList := []Train{}
+// 	err = dbx.Select(&trainList, inQuery, inArgs...)
+// 	if err != nil {
+// 		errorResponse(w, http.StatusBadRequest, err.Error())
+// 		return
+// 	}
+
+// 	stations := []Station{}
+// 	err = dbx.Select(&stations, query)
+// 	if err != nil {
+// 		errorResponse(w, http.StatusBadRequest, err.Error())
+// 		return
+// 	}
+
+// 	fmt.Println("From", fromStation)
+// 	fmt.Println("To", toStation)
+
+// 	trainSearchResponseList := []TrainSearchResponse{}
+
+// 	for _, train := range trainList {
+// 		isSeekedToFirstStation := false
+// 		isContainsOriginStation := false
+// 		isContainsDestStation := false
+// 		i := 0
+
+// 		for _, station := range stations {
+
+// 			if !isSeekedToFirstStation {
+// 				// 駅リストを列車の発駅まで読み飛ばして頭出しをする
+// 				// 列車の発駅以前は止まらないので無視して良い
+// 				if station.Name == train.StartStation {
+// 					isSeekedToFirstStation = true
+// 				} else {
+// 					continue
+// 				}
+// 			}
+
+// 			if station.ID == fromStation.ID {
+// 				// 発駅を経路中に持つ編成の場合フラグを立てる
+// 				isContainsOriginStation = true
+// 			}
+// 			if station.ID == toStation.ID {
+// 				if isContainsOriginStation {
+// 					// 発駅と着駅を経路中に持つ編成の場合
+// 					isContainsDestStation = true
+// 					break
+// 				} else {
+// 					// 出発駅より先に終点が見つかったとき
+// 					fmt.Println("なんかおかしい")
+// 					break
+// 				}
+// 			}
+// 			if station.Name == train.LastStation {
+// 				// 駅が見つからないまま当該編成の終点に着いてしまったとき
+// 				break
+// 			}
+// 			i++
+// 		}
+
+// 		if isContainsOriginStation && isContainsDestStation {
+// 			// 列車情報
+
+// 			// 所要時間
+// 			var departure, arrival string
+// 			var departureInfo  =    DepartureInfo {}
+
+// 			err = dbx.Get(&departureInfo, "SELECT departure, arrival FROM (SELECT departure FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station= ?) a JOIN (SELECT arrival FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station= ?) b on 1=1", date.Format("2006/01/02"), train.TrainClass, train.TrainName, fromStation.Name, date.Format("2006/01/02"), train.TrainClass, train.TrainName, toStation.Name)
+// 			if err != nil {
+// 				errorResponse(w, http.StatusInternalServerError, err.Error())
+// 				return
+// 			}
+// 			departure = departureInfo.Departure
+// 			arrival = departureInfo.Arrival
+			
+// 			departureDate, err := time.Parse("2006/01/02 15:04:05 -07:00 MST", fmt.Sprintf("%s %s +09:00 JST", date.Format("2006/01/02"), departure))
+// 			if err != nil {
+// 				errorResponse(w, http.StatusInternalServerError, err.Error())
+// 				return
+// 			}
+
+// 			if !date.Before(departureDate) {
+// 				// 乗りたい時刻より出発時刻が前なので除外
+// 				continue
+// 			}
+
+// 			// err = dbx.Get(&arrival, "SELECT arrival FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?", date.Format("2006/01/02"), train.TrainClass, train.TrainName, toStation.Name)
+// 			// if err != nil {
+// 			// 	errorResponse(w, http.StatusInternalServerError, err.Error())
+// 			// 	return
+// 			// }
+
+// 			premium_avail_seats, err := train.getAvailableSeats(fromStation, toStation, "premium", false)
+// 			if err != nil {
+// 				errorResponse(w, http.StatusBadRequest, err.Error())
+// 				return
+// 			}
+// 			premium_smoke_avail_seats, err := train.getAvailableSeats(fromStation, toStation, "premium", true)
+// 			if err != nil {
+// 				errorResponse(w, http.StatusBadRequest, err.Error())
+// 				return
+// 			}
+
+// 			reserved_avail_seats, err := train.getAvailableSeats(fromStation, toStation, "reserved", false)
+// 			if err != nil {
+// 				errorResponse(w, http.StatusBadRequest, err.Error())
+// 				return
+// 			}
+// 			reserved_smoke_avail_seats, err := train.getAvailableSeats(fromStation, toStation, "reserved", true)
+// 			if err != nil {
+// 				errorResponse(w, http.StatusBadRequest, err.Error())
+// 				return
+// 			}
+
+// 			premium_avail := "○"
+// 			if len(premium_avail_seats) == 0 {
+// 				premium_avail = "×"
+// 			} else if len(premium_avail_seats) < 10 {
+// 				premium_avail = "△"
+// 			}
+
+// 			premium_smoke_avail := "○"
+// 			if len(premium_smoke_avail_seats) == 0 {
+// 				premium_smoke_avail = "×"
+// 			} else if len(premium_smoke_avail_seats) < 10 {
+// 				premium_smoke_avail = "△"
+// 			}
+
+// 			reserved_avail := "○"
+// 			if len(reserved_avail_seats) == 0 {
+// 				reserved_avail = "×"
+// 			} else if len(reserved_avail_seats) < 10 {
+// 				reserved_avail = "△"
+// 			}
+
+// 			reserved_smoke_avail := "○"
+// 			if len(reserved_smoke_avail_seats) == 0 {
+// 				reserved_smoke_avail = "×"
+// 			} else if len(reserved_smoke_avail_seats) < 10 {
+// 				reserved_smoke_avail = "△"
+// 			}
+
+// 			// 空席情報
+// 			seatAvailability := map[string]string{
+// 				"premium":        premium_avail,
+// 				"premium_smoke":  premium_smoke_avail,
+// 				"reserved":       reserved_avail,
+// 				"reserved_smoke": reserved_smoke_avail,
+// 				"non_reserved":   "○",
+// 			}
+
+// 			// 料金計算
+// 			premiumFare, err := fareCalc(date, fromStation.ID, toStation.ID, train.TrainClass, "premium")
+// 			if err != nil {
+// 				errorResponse(w, http.StatusBadRequest, err.Error())
+// 				return
+// 			}
+// 			premiumFare = premiumFare*adult + premiumFare/2*child
+
+// 			reservedFare, err := fareCalc(date, fromStation.ID, toStation.ID, train.TrainClass, "reserved")
+// 			if err != nil {
+// 				errorResponse(w, http.StatusBadRequest, err.Error())
+// 				return
+// 			}
+// 			reservedFare = reservedFare*adult + reservedFare/2*child
+
+// 			nonReservedFare, err := fareCalc(date, fromStation.ID, toStation.ID, train.TrainClass, "non-reserved")
+// 			if err != nil {
+// 				errorResponse(w, http.StatusBadRequest, err.Error())
+// 				return
+// 			}
+// 			nonReservedFare = nonReservedFare*adult + nonReservedFare/2*child
+
+// 			fareInformation := map[string]int{
+// 				"premium":        premiumFare,
+// 				"premium_smoke":  premiumFare,
+// 				"reserved":       reservedFare,
+// 				"reserved_smoke": reservedFare,
+// 				"non_reserved":   nonReservedFare,
+// 			}
+
+// 			trainSearchResponseList = append(trainSearchResponseList, TrainSearchResponse{
+// 				train.TrainClass, train.TrainName, train.StartStation, train.LastStation,
+// 				fromStation.Name, toStation.Name, departure, arrival, seatAvailability, fareInformation,
+// 			})
+
+// 			if len(trainSearchResponseList) >= 10 {
+// 				break
+// 			}
+// 		}
+// 	}
+// 	resp, err := json.Marshal(trainSearchResponseList)
+// 	if err != nil {
+// 		errorResponse(w, http.StatusBadRequest, err.Error())
+// 		return
+// 	}
+// 	w.Write(resp)
+
+// }
 
 func trainSeatsHandler(w http.ResponseWriter, r *http.Request) {
 	/*
@@ -1712,6 +1954,7 @@ func getAuthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func signUpHandler(w http.ResponseWriter, r *http.Request) {
+	
 	/*
 		ユーザー登録
 		POST /auth/signup
@@ -1740,6 +1983,7 @@ func signUpHandler(w http.ResponseWriter, r *http.Request) {
 		superSecurePassword,
 	)
 	if err != nil {
+		log.Println(err)
 		errorResponse(w, http.StatusBadRequest, "user registration failed")
 		return
 	}

@@ -5,6 +5,7 @@ CREATE TABLE `distance_fare_master` (
   `distance` double NOT NULL,
   `fare` int unsigned NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+create index distance_fare_master_distance_index on distance_fare_master ( distance);
 
 DROP TABLE IF EXISTS `fare_master`;
 CREATE TABLE `fare_master` (
@@ -13,6 +14,7 @@ CREATE TABLE `fare_master` (
   `start_date` datetime NOT NULL,
   `fare_multiplier` double NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+create index fare_master_train_seat_index on fare_master ( train_class, seat_class);
 
 DROP TABLE IF EXISTS `reservations`;
 CREATE TABLE `reservations` (
@@ -29,6 +31,7 @@ CREATE TABLE `reservations` (
   `child` int NOT NULL,
   `amount` bigint NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+create index seat_reservations_date_train_index on reservations ( date, train_class);
 
 DROP TABLE IF EXISTS `seat_master`;
 CREATE TABLE `seat_master` (
@@ -39,6 +42,7 @@ CREATE TABLE `seat_master` (
   `seat_class` enum('premium', 'reserved', 'non-reserved') NOT NULL,
   `is_smoking_seat` tinyint(1) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+create index seat_master_train_car_index on seat_master ( train_class, car_number);
 
 DROP TABLE IF EXISTS `seat_reservations`;
 CREATE TABLE `seat_reservations` (
@@ -47,6 +51,7 @@ CREATE TABLE `seat_reservations` (
   `seat_row` int unsigned NOT NULL,
   `seat_column` varchar(100) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+create index seat_reservations_id_index on seat_reservations ( reservation_id);
 
 DROP TABLE IF EXISTS `station_master`;
 CREATE TABLE `station_master` (
@@ -68,6 +73,7 @@ CREATE TABLE `train_master` (
   `last_station` varchar(100) NOT NULL,
   `is_nobori` tinyint(1) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+create index train_master_date_train_index on train_master (date, train_class);
 
 DROP TABLE IF EXISTS `train_timetable_master`;
 CREATE TABLE `train_timetable_master` (
@@ -78,6 +84,7 @@ CREATE TABLE `train_timetable_master` (
   `departure` time NOT NULL,
   `arrival` time NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+create index train_timetable_master01 ON train_timetable_master (date, train_class, train_name, station);
 
 DROP TABLE IF EXISTS `users`;
 CREATE TABLE `users` (

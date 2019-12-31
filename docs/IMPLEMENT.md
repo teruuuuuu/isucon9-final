@@ -117,6 +117,13 @@ docker-composeを利用する場合、初期データが投入された状態で
 
 docker-composeを使わない場合、 `CREATE DATABSE isutrain` してから `webapp/sql/` 以下の.sqlファイルを順にmysqlコマンドで取り込んでいくことでfixtureを投入できる
 
+事前にDBとユーザを作成しておく
+```
+CREATE DATABASE `isutrain`;
+CREATE USER isutrain IDENTIFIED BY 'isutrain';
+GRANT ALL PRIVILEGES ON `isutrain`.* TO `isutrain`@`%`
+```
+
 ```bash
 sudo mysql < webapp/sql/01_schema.sql
 sudo mysql < webapp/sql/90_train.sql

@@ -104,3 +104,129 @@ func (train Train) getAvailableSeats(fromStation Station, toStation Station, sea
 	}
 	return ret, nil
 }
+
+func (train TrainSection) getAvailableSeats(fromStation Station, toStation Station, seatClass string, isSmokingSeat bool) ([]Seat, error) {
+	// 指定種別の空き座席を返す
+
+	var err error
+
+	// 全ての座席を取得する
+	query := "SELECT * FROM seat_master WHERE train_class=? AND seat_class=? AND is_smoking_seat=?"
+
+	seatList := []Seat{}
+	err = dbx.Select(&seatList, query, train.TrainClass, seatClass, isSmokingSeat)
+	if err != nil {
+		return nil, err
+	}
+
+	availableSeatMap := map[string]Seat{}
+	for _, seat := range seatList {
+		availableSeatMap[fmt.Sprintf("%d_%d_%s", seat.CarNumber, seat.SeatRow, seat.SeatColumn)] = seat
+	}
+
+	// すでに取られている予約を取得する
+	query = `
+	SELECT sr.reservation_id, sr.car_number, sr.seat_row, sr.seat_column
+	FROM seat_reservations sr, reservations r, seat_master s, station_master std, station_master sta
+	WHERE
+		r.reservation_id=sr.reservation_id AND
+		s.train_class=r.train_class AND
+		s.car_number=sr.car_number AND
+		s.seat_column=sr.seat_column AND
+		s.seat_row=sr.seat_row AND
+		std.name=r.departure AND
+		sta.name=r.arrival
+	`
+
+	if train.IsNobori {
+		query += "AND ((sta.id < ? AND ? <= std.id) OR (sta.id < ? AND ? <= std.id) OR (? < sta.id AND std.id < ?))"
+	} else {
+		query += "AND ((std.id <= ? AND ? < sta.id) OR (std.id <= ? AND ? < sta.id) OR (sta.id < ? AND ? < std.id))"
+	}
+
+	seatReservationList := []SeatReservation{}
+	err = dbx.Select(&seatReservationList, query, fromStation.ID, fromStation.ID, toStation.ID, toStation.ID, fromStation.ID, toStation.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, seatReservation := range seatReservationList {
+		key := fmt.Sprintf("%d_%d_%s", seatReservation.CarNumber, seatReservation.SeatRow, seatReservation.SeatColumn)
+		delete(availableSeatMap, key)
+	}
+
+	ret := []Seat{}
+	for _, seat := range availableSeatMap {
+		ret = append(ret, seat)
+	}
+	return ret, nil
+}
+
+func (train TrainSection) getAvailableSeats2(fromStation Station, toStation Station) (map[string]int, error) {
+	// 指定種別の空き座席を返す
+
+	var err error
+
+	sec_judge := ""
+	if train.IsNobori {
+		sec_judge = " ((sta.id < ? AND ? <= std.id) OR (sta.id < ? AND ? <= std.id) OR (? < sta.id AND std.id < ?))"
+	} else {
+		sec_judge = " ((std.id <= ? AND ? < sta.id) OR (std.id <= ? AND ? < sta.id) OR (sta.id < ? AND ? < std.id))"
+	}
+	query := `select s.car_number, s.seat_class, s.is_smoking_seat, s.seat_num - IFNULL(r.count,0) as nokori
+	from (
+		select car_number, seat_class, is_smoking_seat, count(1) as seat_num 
+		from seat_master where seat_class != 'non-reserved' and train_class = ?
+		group by car_number, seat_class, is_smoking_seat
+	) s
+	left join (
+		select tmp.car_number, count(1) as count
+		from (
+			SELECT r.train_class as train_class, sr.car_number, sr.seat_row, sr.seat_column
+			FROM seat_reservations sr, reservations r, seat_master s, station_master std, station_master sta
+			WHERE
+				r.reservation_id=sr.reservation_id AND
+				s.train_class=r.train_class AND
+				s.car_number=sr.car_number AND
+				s.seat_column=sr.seat_column AND
+				s.seat_row=sr.seat_row AND
+				std.name=r.departure AND
+				sta.name=r.arrival AND
+				r.train_class = ? AND
+				` + sec_judge + `
+			group by  r.train_class, sr.car_number, sr.seat_row, sr.seat_column
+		) tmp
+		group by tmp.car_number
+	) r on s.car_number = r.car_number`
+
+	seatList := []SeatNokori{}
+	err = dbx.Select(&seatList, query, train.TrainClass, train.TrainClass, fromStation.ID, fromStation.ID, toStation.ID, toStation.ID, fromStation.ID, toStation.ID)
+	if err != nil {
+		return nil, err
+	}
+	premiumNonSmoking := 0
+	premiumSmoking := 0 
+	reservedNonSmoking := 0 
+	reservedSmoking := 0
+	for _, seat := range seatList {
+		if seat.SeatClass == "premium" {
+			if seat.IsSmokingSeat {
+				premiumSmoking += seat.Nokori
+			} else {
+				premiumNonSmoking += seat.Nokori
+			}
+		} else if seat.SeatClass == "reserved" {
+			if seat.IsSmokingSeat {
+				reservedSmoking += seat.Nokori
+			} else {
+				reservedNonSmoking += seat.Nokori
+			}
+		}
+	}
+	ret := make(map[string]int)
+	ret["premium-nonsmoking"] = premiumNonSmoking
+	ret["premium-smoking"] = premiumSmoking
+	ret["reserved-nonsmoking"] = reservedNonSmoking
+	ret["reserved-smoking"] = reservedSmoking
+	return ret, nil
+}
